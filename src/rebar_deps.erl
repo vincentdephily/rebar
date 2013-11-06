@@ -42,7 +42,8 @@
 -export([info/2]).
 
 -record(dep, { dir,
-               app,
+               sub_dir = "",
+               app = "",
                vsn_regex,
                source,
                is_raw }). %% is_raw = true means non-Erlang/OTP dependency
@@ -55,7 +56,7 @@ preprocess(Config, _) ->
     %% Side effect to set deps_dir globally for all dependencies from
     %% top level down. Means the root deps_dir is honoured or the default
     %% used globally since it will be set on the first time through here
-    Config1 = set_shared_deps_dir(Config, get_shared_deps_dir(Config, [])),
+    Config1 = set_shared_deps_dir(Config),
 
     %% Get the list of deps for the current working directory and identify those
     %% deps that are available/present.
@@ -129,7 +130,7 @@ compile(Config, _) ->
 
 %% set REBAR_DEPS_DIR and ERL_LIBS environment variables
 setup_env(Config) ->
-    {true, DepsDir} = get_deps_dir(Config),
+    {true, DepsDir} = get_shared_deps_dir(Config),
     %% include rebar's DepsDir in ERL_LIBS
     Separator = case os:type() of
                     {win32, nt} ->
@@ -203,7 +204,7 @@ do_check_deps(Config) ->
 
 'delete-deps'(Config, _) ->
     %% Delete all the available deps in our deps/ directory, if any
-    {true, DepsDir} = get_deps_dir(Config),
+    {true, DepsDir} = get_shared_deps_dir(Config),
     Deps = rebar_config:get_local(Config, deps, []),
     {Config1, {AvailableDeps, _}} = find_deps(Config, find, Deps),
     _ = [delete_dep(D)
@@ -263,29 +264,33 @@ info_help(Description) ->
 %% need all deps in same dir and should be the one set by the root rebar.config
 %% In case one is given globally, it has higher priority
 %% Sets a default if root config has no deps_dir set
-set_shared_deps_dir(Config, []) ->
-    LocalDepsDir = rebar_config:get_local(Config, deps_dir, "deps"),
-    GlobalDepsDir = rebar_config:get_global(Config, deps_dir, LocalDepsDir),
-    DepsDir = case os:getenv("REBAR_DEPS_DIR") of
-                  false ->
-                      GlobalDepsDir;
-                  Dir ->
-                      Dir
-              end,
-    rebar_config:set_xconf(Config, deps_dir, DepsDir);
-set_shared_deps_dir(Config, _DepsDir) ->
-    Config.
+set_shared_deps_dir(Config) ->
+    case rebar_config:get_xconf(Config, deps_dir, []) of
+        [] ->
+            DepsDir = case os:getenv("REBAR_DEPS_DIR") of
+                          false ->
+                              LocalDepsDir = rebar_config:get_local(Config, deps_dir, "deps"),
+                              rebar_config:get_global(Config, deps_dir, LocalDepsDir);
+                          Dir ->
+                              Dir
+                      end,
+            rebar_config:set_xconf(Config, deps_dir, DepsDir);
+        _ ->
+            Config
+    end.
 
-get_shared_deps_dir(Config, Default) ->
-    rebar_config:get_xconf(Config, deps_dir, Default).
-
-get_deps_dir(Config) ->
-    get_deps_dir(Config, "").
-
-get_deps_dir(Config, App) ->
+get_shared_deps_dir(Config) ->
     BaseDir = rebar_config:get_xconf(Config, base_dir, []),
-    DepsDir = get_shared_deps_dir(Config, "deps"),
-    {true, filename:join([BaseDir, DepsDir, App])}.
+    DepsDir = rebar_config:get_xconf(Config, deps_dir, "deps"),
+    {true, filename:join(BaseDir, DepsDir)}.
+
+get_dep_checkout_dir(Config, Dep) ->
+    {true, DepsDir} = get_shared_deps_dir(Config),
+    {true, filename:join(DepsDir, Dep#dep.app)}.
+
+get_dep_app_dir(Config, Dep) ->
+    {true, DepsDir} = get_shared_deps_dir(Config),
+    {true, filename:join([DepsDir, Dep#dep.app, Dep#dep.sub_dir])}.
 
 dep_dirs(Deps) ->
     [D#dep.dir || D <- Deps].
@@ -306,8 +311,7 @@ update_deps_code_path(Config, []) ->
     Config;
 update_deps_code_path(Config, [Dep | Rest]) ->
     Config2 =
-        case is_app_available(Config, Dep#dep.app,
-                              Dep#dep.vsn_regex, Dep#dep.dir, Dep#dep.is_raw) of
+        case is_app_available(Config, Dep) of
             {Config1, {true, _}} ->
                 Dir = filename:join(Dep#dep.dir, "ebin"),
                 ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
@@ -339,6 +343,7 @@ find_deps(Config, Mode, [{App, VsnRegex, Source, Opts} | Rest], Acc)
     Dep = #dep { app = App,
                  vsn_regex = VsnRegex,
                  source = Source,
+                 sub_dir = proplists:get_value(sub_dir, Opts, ""),
                  %% dependency is considered raw (i.e. non-Erlang/OTP) when
                  %% 'raw' option is present
                  is_raw = proplists:get_value(raw, Opts, false) },
@@ -359,7 +364,7 @@ find_dep(Config, Dep) ->
 find_dep(Config, Dep, undefined) ->
     %% 'source' is undefined.  If Dep is not satisfied locally,
     %% go ahead and find it amongst the lib_dir's.
-    case find_dep_in_dir(Config, Dep, get_deps_dir(Config, Dep#dep.app)) of
+    case find_dep_in_dir(Config, Dep, get_dep_app_dir(Config, Dep)) of
         {_Config1, {avail, _Dir}} = Avail ->
             Avail;
         {Config1, {missing, _}} ->
@@ -369,15 +374,12 @@ find_dep(Config, Dep, _Source) ->
     %% _Source is defined.  Regardless of what it is, we must find it
     %% locally satisfied or fetch it from the original source
     %% into the project's deps
-    find_dep_in_dir(Config, Dep, get_deps_dir(Config, Dep#dep.app)).
+    find_dep_in_dir(Config, Dep, get_dep_app_dir(Config, Dep)).
 
 find_dep_in_dir(Config, _Dep, {false, Dir}) ->
     {Config, {missing, Dir}};
 find_dep_in_dir(Config, Dep, {true, Dir}) ->
-    App = Dep#dep.app,
-    VsnRegex = Dep#dep.vsn_regex,
-    IsRaw = Dep#dep.is_raw,
-    case is_app_available(Config, App, VsnRegex, Dir, IsRaw) of
+    case is_app_available(Config, Dep#dep{dir = Dir}) of
         {Config1, {true, _AppFile}} -> {Config1, {avail, Dir}};
         {Config1, {false, _}}       -> {Config1, {missing, Dir}}
     end.
@@ -406,7 +408,8 @@ require_source_engine(Source) ->
 %%
 %% IsRaw = true means non-Erlang/OTP dependency, e.g. the one that does not
 %% have a proper .app file
-is_app_available(Config, App, VsnRegex, Path, _IsRaw = false) ->
+is_app_available(Config, #dep{app = App, vsn_regex = VsnRegex, is_raw = false} = Dep) ->
+    {true, Path} = get_dep_app_dir(Config, Dep),
     ?DEBUG("is_app_available, looking for App ~p with Path ~p~n", [App, Path]),
     case rebar_app_utils:is_app_dir(Path) of
         {true, AppFile} ->
@@ -438,7 +441,7 @@ is_app_available(Config, App, VsnRegex, Path, _IsRaw = false) ->
                   "but no .app found.\n", [Path]),
             {Config, {false, {missing_app_file, Path}}}
     end;
-is_app_available(Config, App, _VsnRegex, Path, _IsRaw = true) ->
+is_app_available(Config, #dep{app = App, dir = Path, is_raw = true}) ->
     ?DEBUG("is_app_available, looking for Raw Depencency ~p with Path ~p~n", [App, Path]),
     case filelib:is_dir(Path) of
         true ->
@@ -462,8 +465,7 @@ use_source(Config, Dep, Count) ->
     case filelib:is_dir(Dep#dep.dir) of
         true ->
             %% Already downloaded -- verify the versioning matches the regex
-            case is_app_available(Config, Dep#dep.app,
-                                  Dep#dep.vsn_regex, Dep#dep.dir, Dep#dep.is_raw) of
+            case is_app_available(Config, Dep) of
                 {Config1, {true, _}} ->
                     Dir = filename:join(Dep#dep.dir, "ebin"),
                     ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
@@ -480,9 +482,9 @@ use_source(Config, Dep, Count) ->
         false ->
             ?CONSOLE("Pulling ~p from ~p\n", [Dep#dep.app, Dep#dep.source]),
             require_source_engine(Dep#dep.source),
-            {true, TargetDir} = get_deps_dir(Config, Dep#dep.app),
-            download_source(TargetDir, Dep#dep.source),
-            use_source(Config, Dep#dep { dir = TargetDir }, Count-1)
+            {true, CheckoutDir} = get_dep_checkout_dir(Config, Dep),
+            download_source(CheckoutDir, Dep#dep.source),
+            use_source(Config, Dep#dep { dir = CheckoutDir }, Count-1)
     end.
 
 download_source(AppDir, {hg, Url, Rev}) ->
@@ -540,12 +542,12 @@ update_source(Config, Dep) ->
     %% VCS directory, such as when a source archive is built of a project, with
     %% all deps already downloaded/included. So, verify that the necessary VCS
     %% directory exists before attempting to do the update.
-    {true, AppDir} = get_deps_dir(Config, Dep#dep.app),
-    case has_vcs_dir(element(1, Dep#dep.source), AppDir) of
+    {true, CheckoutDir} = get_dep_checkout_dir(Config, Dep),
+    case has_vcs_dir(element(1, Dep#dep.source), CheckoutDir) of
         true ->
             ?CONSOLE("Updating ~p from ~p\n", [Dep#dep.app, Dep#dep.source]),
             require_source_engine(Dep#dep.source),
-            update_source1(AppDir, Dep#dep.source),
+            update_source1(CheckoutDir, Dep#dep.source),
             Dep;
         false ->
             ?WARN("Skipping update for ~p: "
@@ -606,8 +608,8 @@ update_deps_int(Config0, UDD) ->
                   ],
 
     lists:foldl(fun(Dep, {Config, Updated}) ->
-                        {true, AppDir} = get_deps_dir(Config, Dep#dep.app),
-                        Config2 = case has_vcs_dir(element(1, Dep#dep.source), AppDir) of
+                        {true, CheckoutDir} = get_dep_checkout_dir(Config, Dep),
+                        Config2 = case has_vcs_dir(element(1, Dep#dep.source), CheckoutDir) of
                             false ->
                                 %% If the dep did not exist (maybe it was added)
                                 %% clone it. We'll traverse ITS deps below. and
@@ -617,7 +619,7 @@ update_deps_int(Config0, UDD) ->
                             true ->
                                 Config
                         end,
-                        ok = file:set_cwd(AppDir),
+                        ok = file:set_cwd(CheckoutDir),
                         Config3 = rebar_config:new(Config2),
                         %% track where a dep comes from...
                         Config4 = rebar_config:set(Config3, depowner,
@@ -625,7 +627,6 @@ update_deps_int(Config0, UDD) ->
                                                                rebar_config:get(Config3,
                                                                                 depowner,
                                                                                 dict:new()))),
-
                         {Config5, Res} = update_deps_int(Config4, Updated),
                         {Config5, lists:umerge(lists:sort(Res),
                                                lists:sort(Updated))}
@@ -633,7 +634,7 @@ update_deps_int(Config0, UDD) ->
                                             lists:sort(UDD))}, UpdatedDeps).
 
 should_skip_update_dep(Config, Dep) ->
-    {true, AppDir} = get_deps_dir(Config, Dep#dep.app),
+    {true, AppDir} = get_dep_app_dir(Config, Dep),
     case rebar_app_utils:is_app_dir(AppDir) of
         false ->
             false;
@@ -655,8 +656,8 @@ collect_deps(Dir, C) ->
             {Config1, Deps} = find_deps(Config, read, RawDeps),
 
             lists:flatten(Deps ++ [begin
-                                       {true, AppDir} = get_deps_dir(Config1, Dep#dep.app),
-                                       collect_deps(AppDir, C)
+                                       {true, CheckoutDir} = get_dep_checkout_dir(Config1, Dep),
+                                       collect_deps(CheckoutDir, C)
                                    end || Dep <- Deps]);
         _ ->
             []
