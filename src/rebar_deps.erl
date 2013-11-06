@@ -241,24 +241,25 @@ info(help, 'list-deps') ->
 
 info_help(Description) ->
     ?CONSOLE(
-       "~s.~n"
-       "~n"
-       "Valid rebar.config options:~n"
-       "  ~p~n"
-       "  ~p~n"
-       "Valid command line options:~n"
-       "  deps_dir=\"deps\" (override default or rebar.config deps_dir)~n",
-       [
-        Description,
-        {deps_dir, "deps"},
-        {deps, [application_name,
-                {application_name, "1.0.*"},
-                {application_name, "1.0.*",
-                 {git, "git://github.com/rebar/rebar.git", {branch, "master"}}},
-                {application_name, "",
-                 {git, "git://github.com/rebar/rebar.git", {branch, "master"}},
-                 [raw]}]}
-       ]).
+       "~s.\n\n"
+       "Valid rebar.config options:\n"
+       "  {deps_dir,\"deps\"}\n"
+       "  {deps,[application_name,\n"
+       "         {application_name,\"1.0.*\"},\n"
+       "         {application_name,\"1.0.*\",RepositorySpec},\n"
+       "         {application_name,\"\",     RepositorySpec,[DepOption]}\n"
+       "        ]}\n"
+       "  RepositorySpec:\n"
+       "    {VCS, Url} | {VCS, Url, Revision}\n"
+       "    VCS: hg|git|bzr|svn|rsync|fossil\n"
+       "    Url: \"git://github.com/rebar/rebar.git\"\n"
+       "    Revision: {branch,\"master\"} | {tag,\"v1.0.0\"} | \"\"\n"
+       "  DepOption:\n"
+       "    raw: Dependency not compilable by rebar.\n"
+       "    {sub_dir,\"erl\"}: Location of the OTP/rebar dep in the VCS chekout.\n"
+       "Valid command line options:\n"
+       "  deps_dir=\"deps\" (override default or rebar.config deps_dir)\n",
+       [Description]).
 
 %% Added because of trans deps,
 %% need all deps in same dir and should be the one set by the root rebar.config
